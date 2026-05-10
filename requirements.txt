@@ -12,3 +12,6 @@ APScheduler
 ua-generator
 pyjwt
 diskcache
+redis[hiredis]>=5.0
+cryptography>=42.0
+aiohttp>=3.9

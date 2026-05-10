@@ -1,10 +1,27 @@
 version: '3'
 
 services:
+  redis:
+    image: redis:7-alpine
+    container_name: chat2api-redis
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --maxmemory
+      - "2gb"
+      - --maxmemory-policy
+      - "allkeys-lru"
+
   chat2api:
     image: lanqian528/chat2api:latest
     container_name: chat2api
     restart: unless-stopped
+    depends_on:
+      - redis
     ports:
       - '5005:5005'
     volumes:
@@ -12,6 +29,33 @@ services:
     environment:
       - TZ=Asia/Shanghai
       - AUTHORIZATION=sk-xxx
+      - ENABLE_GATEWAY=true
+      - REDIS_URL=redis://redis:6379/0
+      - GATEWAY_ID=gw-1
+      - COOKIE_ENCRYPTION_KEY=${COOKIE_ENCRYPTION_KEY}
+      - ASYNC_MODELS=gpt-5.5-pro,o1-pro,deep-research
+      - DRIVER_MODE=redis
+
+  worker:
+    build:
+      context: .
+      dockerfile: workers/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - redis
+    deploy:
+      replicas: 4
+    shm_size: 2gb
+    cap_add:
+      - SYS_ADMIN
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - WORKER_ID=worker-${HOSTNAME:-1}
+      - SLOTS_PER_WORKER=2
+      - COOKIE_ENCRYPTION_KEY=${COOKIE_ENCRYPTION_KEY}
+      - BROWSER_HEADLESS=false
+    volumes:
+      - browser-profiles:/var/lib/browser-profiles
 
   watchtower:
     image: containrrr/watchtower
@@ -20,3 +64,7 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     command: --cleanup --interval 300 chat2api
+
+volumes:
+  redis-data:
+  browser-profiles:

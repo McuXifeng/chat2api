@@ -7,7 +7,6 @@ import time
 import uuid
 
 import pybase64
-import websockets
 from fastapi import HTTPException
 
 from api.files import get_file_content
@@ -69,43 +68,6 @@ async def format_not_stream_response(response, prompt_tokens, max_tokens, model)
     if system_fingerprint:
         data["system_fingerprint"] = system_fingerprint
     return data
-
-
-async def wss_stream_response(websocket, conversation_id):
-    while not websocket.closed:
-        try:
-            message = await asyncio.wait_for(websocket.recv(), timeout=10)
-            if message:
-                resultObj = json.loads(message)
-                sequenceId = resultObj.get("sequenceId", None)
-                if not sequenceId:
-                    continue
-                data = resultObj.get("data", {})
-                if conversation_id != data.get("conversation_id", ""):
-                    continue
-                sequenceId = resultObj.get('sequenceId')
-                if sequenceId and sequenceId % 80 == 0:
-                    await websocket.send(
-                        json.dumps(
-                            {"type": "sequenceAck", "sequenceId": sequenceId}
-                        )
-                    )
-                decoded_bytes = pybase64.b64decode(data.get("body", None))
-                yield decoded_bytes
-            else:
-                print("No message received within the specified time.")
-        except asyncio.TimeoutError:
-            logger.error("Timeout! No message received within the specified time.")
-            break
-        except websockets.ConnectionClosed as e:
-            if e.code == 1000:
-                logger.error("WebSocket closed normally with code 1000 (OK)")
-                yield b"data: [DONE]\n\n"
-            else:
-                logger.error(f"WebSocket closed with error code {e.code}")
-        except Exception as e:
-            logger.error(f"Error: {str(e)}")
-            continue
 
 
 async def head_process_response(response):

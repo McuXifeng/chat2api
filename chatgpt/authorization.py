@@ -1,4 +1,3 @@
-import asyncio
 import json
 import random
 
@@ -6,11 +5,16 @@ from fastapi import HTTPException
 
 import utils.configs as configs
 import utils.globals as globals
-from chatgpt.refreshToken import rt2ac
 from utils.Logger import logger
 
 
 def get_req_token(req_token, seed=None):
+    """
+    Returns a *caller identity* string used for sticky-routing & limit bucketing.
+    No longer represents a real chatgpt credential — Workers carry cookies via
+    the InstancePool. The token-pool / seed-map mechanics are preserved so that
+    existing client integrations don't break.
+    """
     if configs.auto_seed:
         available_token_list = list(set(globals.token_list) - set(globals.error_token_list))
         length = len(available_token_list)
@@ -24,55 +28,33 @@ def get_req_token(req_token, seed=None):
             return req_token
 
         if req_token in configs.authorization_list:
-            if len(available_token_list) > 0:
+            if length > 0:
                 if configs.random_token:
-                    req_token = random.choice(available_token_list)
-                    return req_token
-                else:
-                    globals.count += 1
-                    globals.count %= length
-                    return available_token_list[globals.count]
-            else:
-                return ""
-        else:
-            return req_token
-    else:
-        seed = req_token
-        if seed not in globals.seed_map.keys():
-            raise HTTPException(status_code=401, detail={"error": "Invalid Seed"})
-        return globals.seed_map[seed]["token"]
+                    return random.choice(available_token_list)
+                globals.count = (globals.count + 1) % length
+                return available_token_list[globals.count]
+            return ""
+        return req_token
+    seed = req_token
+    if seed not in globals.seed_map.keys():
+        raise HTTPException(status_code=401, detail={"error": "Invalid Seed"})
+    return globals.seed_map[seed]["token"]
 
 
 async def verify_token(req_token):
+    """
+    Backwards-compat shim: returns the caller identity string itself in
+    Browser-Driver mode. Auth is now via cookies on the worker side.
+    """
     if not req_token:
         if configs.authorization_list:
             logger.error("Unauthorized with empty token.")
             raise HTTPException(status_code=401)
-        else:
-            return None
-    else:
-        if req_token.startswith("eyJhbGciOi") or req_token.startswith("fk-"):
-            access_token = req_token
-            return access_token
-        elif len(req_token) == 45:
-            try:
-                if req_token in globals.error_token_list:
-                    raise HTTPException(status_code=401, detail="Error RefreshToken")
-
-                access_token = await rt2ac(req_token, force_refresh=False)
-                return access_token
-            except HTTPException as e:
-                raise HTTPException(status_code=e.status_code, detail=e.detail)
-        else:
-            return req_token
+        return None
+    return req_token
 
 
 async def refresh_all_tokens(force_refresh=False):
-    for token in list(set(globals.token_list) - set(globals.error_token_list)):
-        if len(token) == 45:
-            try:
-                await asyncio.sleep(0.5)
-                await rt2ac(token, force_refresh=force_refresh)
-            except HTTPException:
-                pass
-    logger.info("All tokens refreshed.")
+    """No-op kept for APScheduler entrypoint stability; will be removed."""
+    logger.info("refresh_all_tokens is a no-op in Browser-Driver mode")
+    return

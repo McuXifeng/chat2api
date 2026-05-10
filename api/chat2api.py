@@ -1,8 +1,7 @@
 import asyncio
 import types
 
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from fastapi import Request, HTTPException, Form, Security
+from fastapi import Request, HTTPException, Form, Security, Header
 from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials
 from starlette.background import BackgroundTask
@@ -10,28 +9,26 @@ from starlette.background import BackgroundTask
 import utils.globals as globals
 from app import app, templates, security_scheme
 from chatgpt.ChatService import ChatService
-from chatgpt.authorization import refresh_all_tokens
+from chatgpt.Driver import get_driver
+from chatgpt.Heartbeat import heartbeat_wrap
 from utils.Logger import logger
-from utils.configs import api_prefix, scheduled_refresh
-from utils.retry import async_retry
-
-scheduler = AsyncIOScheduler()
+from utils.configs import api_prefix, heartbeat_interval
 
 
 @app.on_event("startup")
 async def app_start():
-    if scheduled_refresh:
-        scheduler.add_job(id='refresh', func=refresh_all_tokens, trigger='cron', hour=3, minute=0, day='*/2',
-                          kwargs={'force_refresh': True})
-        scheduler.start()
-        asyncio.get_event_loop().call_later(0, lambda: asyncio.create_task(refresh_all_tokens(force_refresh=False)))
+    try:
+        driver = get_driver()
+        await driver.ensure_groups()
+        logger.info("Driver Redis groups ensured")
+    except Exception as e:
+        logger.error(f"Driver startup failed (non-fatal): {e}")
 
 
 async def to_send_conversation(request_data, req_token):
     chat_service = ChatService(req_token)
     try:
         await chat_service.set_dynamic_data(request_data)
-        await chat_service.get_chat_requirements()
         return chat_service
     except HTTPException as e:
         await chat_service.close_client()
@@ -50,30 +47,81 @@ async def process(request_data, req_token):
 
 
 @app.post(f"/{api_prefix}/v1/chat/completions" if api_prefix else "/v1/chat/completions")
-async def send_conversation(request: Request, credentials: HTTPAuthorizationCredentials = Security(security_scheme)):
+async def send_conversation(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials = Security(security_scheme),
+):
     req_token = credentials.credentials
     try:
         request_data = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail={"error": "Invalid JSON body"})
-    chat_service, res = await async_retry(process, request_data, req_token)
+
+    chat_service, res = await process(request_data, req_token)
     try:
+        if chat_service.async_mode:
+            background = BackgroundTask(chat_service.close_client)
+            return JSONResponse(res, status_code=202, background=background)
         if isinstance(res, types.AsyncGeneratorType):
             background = BackgroundTask(chat_service.close_client)
-            return StreamingResponse(res, media_type="text/event-stream", background=background)
-        else:
-            background = BackgroundTask(chat_service.close_client)
-            return JSONResponse(res, media_type="application/json", background=background)
+            return StreamingResponse(
+                heartbeat_wrap(res, interval=heartbeat_interval),
+                media_type="text/event-stream", background=background,
+            )
+        background = BackgroundTask(chat_service.close_client)
+        return JSONResponse(res, media_type="application/json", background=background)
     except HTTPException as e:
         await chat_service.close_client()
-        if e.status_code == 500:
-            logger.error(f"Server error, {str(e)}")
-            raise HTTPException(status_code=500, detail="Server error")
         raise HTTPException(status_code=e.status_code, detail=e.detail)
     except Exception as e:
         await chat_service.close_client()
         logger.error(f"Server error, {str(e)}")
         raise HTTPException(status_code=500, detail="Server error")
+
+
+@app.get(f"/{api_prefix}/v1/tasks/{{task_id}}" if api_prefix else "/v1/tasks/{task_id}")
+async def get_task_status(task_id: str,
+                          credentials: HTTPAuthorizationCredentials = Security(security_scheme)):
+    driver = get_driver()
+    task = await driver.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found or expired")
+    safe = {k: v for k, v in task.items() if k != "payload"}
+    return JSONResponse(safe)
+
+
+@app.get(f"/{api_prefix}/v1/tasks/{{task_id}}/events" if api_prefix else "/v1/tasks/{task_id}/events")
+async def stream_task_events(task_id: str,
+                             last_event_id: str = Header(default="0-0", alias="Last-Event-ID"),
+                             credentials: HTTPAuthorizationCredentials = Security(security_scheme)):
+    driver = get_driver()
+    task = await driver.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found or expired")
+
+    async def event_generator():
+        async for chunk in driver.iter_chunks(
+            task_id, last_id=last_event_id, heartbeat_every=heartbeat_interval
+        ):
+            cur = await driver.cursor_get(task_id)
+            if chunk.startswith(b": "):
+                yield chunk
+                continue
+            yield b"id: " + cur.encode() + b"\n" + chunk
+        yield b"event: done\ndata: {}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@app.post(f"/{api_prefix}/v1/tasks/{{task_id}}/cancel" if api_prefix else "/v1/tasks/{task_id}/cancel")
+async def cancel_task(task_id: str,
+                      credentials: HTTPAuthorizationCredentials = Security(security_scheme)):
+    driver = get_driver()
+    task = await driver.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    await driver.cancel(task_id)
+    return JSONResponse({"task_id": task_id, "status": "cancelling"})
 
 
 @app.get(f"/{api_prefix}/tokens" if api_prefix else "/tokens", response_class=HTMLResponse)

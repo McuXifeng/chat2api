@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta content="width=device-width, initial-scale=1.0" name="viewport">
+    <title>浏览器实例池</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        const apiPrefix = "{{ api_prefix }}";
+        const base = apiPrefix && apiPrefix !== "None" ? `/${apiPrefix}` : "";
+
+        async function loadInstances() {
+            const resp = await fetch(base + "/instances.json");
+            const data = await resp.json();
+            const tbody = document.getElementById("tbody");
+            tbody.innerHTML = "";
+            for (const row of data.instances) {
+                const tr = document.createElement("tr");
+                tr.className = "border-b";
+                tr.innerHTML = `
+                    <td class="p-2 font-mono text-xs">${row.instance_id}</td>
+                    <td class="p-2">${row.account_email || "-"}</td>
+                    <td class="p-2">${row.tier || "-"}</td>
+                    <td class="p-2">${row.plan_caps || "-"}</td>
+                    <td class="p-2"><span class="px-2 py-1 rounded text-xs ${
+                        row.status === "idle" ? "bg-green-100 text-green-800" :
+                        row.status === "busy" ? "bg-yellow-100 text-yellow-800" :
+                        "bg-red-100 text-red-800"
+                    }">${row.status}</span></td>
+                    <td class="p-2">${row.consecutive_errors || 0}</td>
+                    <td class="p-2 text-right">
+                        <button class="text-blue-600 hover:underline" data-action="test" data-id="${row.instance_id}">test</button>
+                        <button class="text-red-600 hover:underline ml-3" data-action="del" data-id="${row.instance_id}">delete</button>
+                    </td>`;
+                tbody.appendChild(tr);
+            }
+        }
+
+        document.addEventListener("click", async (ev) => {
+            const t = ev.target;
+            if (!t.dataset.action) return;
+            const id = t.dataset.id;
+            if (t.dataset.action === "del") {
+                if (!confirm(`Delete ${id}?`)) return;
+                await fetch(`${base}/instances/${id}`, { method: "DELETE" });
+                loadInstances();
+            } else if (t.dataset.action === "test") {
+                await fetch(`${base}/instances/${id}/test`, { method: "POST" });
+                alert("Ping queued.");
+            }
+        });
+
+        document.addEventListener("DOMContentLoaded", () => {
+            loadInstances();
+            document.getElementById("addForm").addEventListener("submit", async (e) => {
+                e.preventDefault();
+                const fd = new FormData(e.target);
+                const body = Object.fromEntries(fd.entries());
+                if (body.cookies) {
+                    try { body.cookies = JSON.parse(body.cookies); } catch (_) { }
+                }
+                if (body.fingerprint) {
+                    try { body.fingerprint = JSON.parse(body.fingerprint); } catch (_) { }
+                }
+                if (body.plan_caps) body.plan_caps = body.plan_caps.split(",").map(s => s.trim());
+                const resp = await fetch(base + "/instances", {
+                    method: "POST",
+                    headers: { "content-type": "application/json" },
+                    body: JSON.stringify(body),
+                });
+                if (resp.ok) { e.target.reset(); loadInstances(); }
+                else alert("Failed: " + await resp.text());
+            });
+        });
+    </script>
+</head>
+<body class="bg-gray-50 p-8">
+    <div class="max-w-6xl mx-auto">
+        <h1 class="text-3xl font-extrabold mb-6">浏览器实例池</h1>
+
+        <div class="bg-white rounded-lg shadow p-6 mb-6">
+            <h2 class="text-xl font-bold mb-4">添加实例</h2>
+            <form id="addForm" class="grid grid-cols-2 gap-4">
+                <input name="account_email" placeholder="account_email" class="border rounded p-2" />
+                <select name="tier" class="border rounded p-2">
+                    <option value="free">free</option>
+                    <option value="plus" selected>plus</option>
+                    <option value="team">team</option>
+                    <option value="pro">pro</option>
+                </select>
+                <input name="plan_caps" placeholder="plan_caps (comma-separated, e.g. gpt-4o,gpt-5.5-pro)" class="border rounded p-2 col-span-2" />
+                <input name="proxy_url" placeholder="proxy_url (optional)" class="border rounded p-2 col-span-2" />
+                <textarea name="cookies" placeholder='cookies JSON, e.g. {"__Secure-next-auth.session-token":"...","_cfuvid":"..."}' class="border rounded p-2 col-span-2 font-mono text-xs" rows="4"></textarea>
+                <textarea name="fingerprint" placeholder='fingerprint JSON, e.g. {"ua":"Mozilla/5.0...","viewport":{"width":1440,"height":900},"timezone":"America/Los_Angeles"}' class="border rounded p-2 col-span-2 font-mono text-xs" rows="3"></textarea>
+                <input name="notes" placeholder="notes" class="border rounded p-2 col-span-2" />
+                <button type="submit" class="bg-blue-600 text-white py-2 rounded col-span-2 hover:bg-blue-700">添加</button>
+            </form>
+        </div>
+
+        <div class="bg-white rounded-lg shadow p-6">
+            <div class="flex justify-between items-center mb-4">
+                <h2 class="text-xl font-bold">实例列表</h2>
+                <button onclick="loadInstances()" class="text-sm text-blue-600 hover:underline">刷新</button>
+            </div>
+            <table class="w-full text-sm">
+                <thead class="text-left bg-gray-100">
+                    <tr>
+                        <th class="p-2">instance_id</th>
+                        <th class="p-2">account_email</th>
+                        <th class="p-2">tier</th>
+                        <th class="p-2">plan_caps</th>
+                        <th class="p-2">status</th>
+                        <th class="p-2">errors</th>
+                        <th class="p-2 text-right">操作</th>
+                    </tr>
+                </thead>
+                <tbody id="tbody"></tbody>
+            </table>
+        </div>
+    </div>
+</body>
+</html>

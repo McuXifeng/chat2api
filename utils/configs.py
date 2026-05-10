@@ -69,6 +69,33 @@ auto_seed = is_true(os.getenv('AUTO_SEED', True))
 force_no_history = is_true(os.getenv('FORCE_NO_HISTORY', False))
 no_sentinel = is_true(os.getenv('NO_SENTINEL', False))
 
+# ---- Browser-Driver mode ----
+redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
+worker_dispatch_stream = os.getenv('WORKER_DISPATCH_STREAM', 'jobs.dispatch')
+worker_control_stream = os.getenv('WORKER_CONTROL_STREAM', 'jobs.control')
+worker_dlq_stream = os.getenv('WORKER_DLQ_STREAM', 'jobs.dlq')
+worker_dispatch_group = os.getenv('WORKER_DISPATCH_GROUP', 'workers')
+task_ttl_seconds = int(os.getenv('TASK_TTL_SECONDS', 10800))
+lease_ttl_seconds = int(os.getenv('LEASE_TTL_SECONDS', 14400))
+heartbeat_interval = float(os.getenv('HEARTBEAT_INTERVAL', 25))
+async_models_str = os.getenv('ASYNC_MODELS', 'gpt-5.5-pro,o1-pro,deep-research')
+async_models = [m.strip() for m in async_models_str.split(',') if m.strip()]
+cookie_encryption_key = os.getenv('COOKIE_ENCRYPTION_KEY', None)
+gateway_id = os.getenv('GATEWAY_ID', os.getenv('HOSTNAME', 'gw-default'))
+driver_mode = os.getenv('DRIVER_MODE', 'redis')  # redis | legacy
+instance_pool_backend = os.getenv('INSTANCE_POOL_BACKEND', 'redis')  # redis | file
+
+_deprecated_in_driver_mode = {
+    'ARK0SE_TOKEN_URL': ark0se_token_url,
+    'SENTINEL_PROXY_URL': sentinel_proxy_url,
+    'TURNSTILE_SOLVER_URL': turnstile_solver_url,
+    'POW_DIFFICULTY': pow_difficulty if pow_difficulty != '000032' else None,
+}
+if driver_mode == 'redis':
+    for env_name, env_val in _deprecated_in_driver_mode.items():
+        if env_val:
+            logger.warning(f"{env_name} is set but unused in DRIVER_MODE=redis (deprecated, will be removed)")
+
 with open('version.txt') as f:
     version = f.read().strip()
 
@@ -103,4 +130,11 @@ logger.info("------------------------- Gateway --------------------------")
 logger.info("ENABLE_GATEWAY:    " + str(enable_gateway))
 logger.info("AUTO_SEED:         " + str(auto_seed))
 logger.info("FORCE_NO_HISTORY: " + str(force_no_history))
+logger.info("------------------------- Driver ---------------------------")
+logger.info("DRIVER_MODE:       " + str(driver_mode))
+logger.info("REDIS_URL:         " + str(redis_url))
+logger.info("ASYNC_MODELS:      " + str(async_models))
+logger.info("TASK_TTL_SECONDS:  " + str(task_ttl_seconds))
+logger.info("LEASE_TTL_SECONDS: " + str(lease_ttl_seconds))
+logger.info("GATEWAY_ID:        " + str(gateway_id))
 logger.info("-" * 60)
