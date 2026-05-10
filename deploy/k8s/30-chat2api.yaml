@@ -1,0 +1,69 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chat2api
+  namespace: chat2api
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels: { app: chat2api }
+  template:
+    metadata:
+      labels: { app: chat2api }
+    spec:
+      containers:
+        - name: chat2api
+          image: chat2api:current
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 5005
+              name: http
+          env:
+            - name: TZ
+              value: Asia/Shanghai
+            - name: ENABLE_GATEWAY
+              value: "true"
+            - name: DRIVER_MODE
+              value: "redis"
+            - name: REDIS_URL
+              value: "redis://redis.chat2api.svc.cluster.local:6379/0"
+            - name: GATEWAY_ID
+              value: "gw-prod-1"
+            - name: ASYNC_MODELS
+              value: "gpt-5.5-pro,o1-pro,deep-research"
+            - name: AUTHORIZATION
+              valueFrom:
+                secretKeyRef: { name: chat2api-secrets, key: authorization }
+            - name: COOKIE_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef: { name: chat2api-secrets, key: cookie-encryption-key }
+          resources:
+            requests: { cpu: "100m", memory: "256Mi" }
+            limits:   { cpu: "1000m", memory: "768Mi" }
+          readinessProbe:
+            httpGet: { path: /, port: 5005 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /, port: 5005 }
+            initialDelaySeconds: 30
+            periodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: chat2api
+  namespace: chat2api
+spec:
+  type: NodePort
+  selector: { app: chat2api }
+  ports:
+    - name: http
+      port: 5005
+      targetPort: 5005
+      nodePort: 30005

@@ -5,4 +5,7 @@
 /tmp/
 /data/
 /.venv/
+/.venv-test/
 /.vscode/
+REFACTOR_CONTEXT.md
+/deploy/k8s/secret.yaml
