@@ -1,4 +1,3 @@
-import hashlib
 import json
 import random
 import time
@@ -8,12 +7,10 @@ from fastapi import Request, HTTPException
 from fastapi.responses import StreamingResponse, Response
 from starlette.background import BackgroundTask
 
-import utils.globals as globals
-from chatgpt.authorization import verify_token, get_req_token
-from chatgpt.fp import get_fp
+from chatgpt.InstancePool import get_pool
 from utils.Client import Client
 from utils.Logger import logger
-from utils.configs import chatgpt_base_url_list, sentinel_proxy_url_list, force_no_history, file_host, voice_host
+from utils.configs import chatgpt_base_url_list, file_host, voice_host
 
 
 def generate_current_time():
@@ -91,77 +88,34 @@ headers_accept_list = [
 ]
 
 
-async def get_real_req_token(token):
-    req_token = get_req_token(token)
-    if len(req_token) == 45 or req_token.startswith("eyJhbGciOi"):
-        return req_token
-    else:
-        req_token = get_req_token("", token)
-        return req_token
+async def _select_instance():
+    """Pick an instance from the pool without acquiring a lease.
+
+    The pool's busy/idle bookkeeping is owned by Workers; reverseProxy is read-only.
+    """
+    pool = get_pool()
+    instances = await pool.list_instances()
+    if not instances:
+        return None
+    idle = next((i for i in instances if i.get("status") == "idle"), None)
+    return idle or instances[0]
 
 
-def save_conversation(token, conversation_id, title=None):
-    if conversation_id not in globals.conversation_map:
-        conversation_detail = {
-            "id": conversation_id,
-            "title": title,
-            "create_time": generate_current_time(),
-            "update_time": generate_current_time()
-        }
-        globals.conversation_map[conversation_id] = conversation_detail
-    else:
-        globals.conversation_map[conversation_id]["update_time"] = generate_current_time()
-        if title:
-            globals.conversation_map[conversation_id]["title"] = title
-    if conversation_id not in globals.seed_map[token]["conversations"]:
-        globals.seed_map[token]["conversations"].insert(0, conversation_id)
-    else:
-        globals.seed_map[token]["conversations"].remove(conversation_id)
-        globals.seed_map[token]["conversations"].insert(0, conversation_id)
-    with open(globals.CONVERSATION_MAP_FILE, "w", encoding="utf-8") as f:
-        json.dump(globals.conversation_map, f, indent=4)
-    with open(globals.SEED_MAP_FILE, "w", encoding="utf-8") as f:
-        json.dump(globals.seed_map, f, indent=4)
-    if title:
-        logger.info(f"Conversation ID: {conversation_id}, Title: {title}")
+def _flatten_cookies(raw):
+    """Cookie-Editor list / dict → flat dict accepted by curl_cffi."""
+    if isinstance(raw, dict):
+        return {k: str(v) for k, v in raw.items()}
+    out = {}
+    for c in raw or []:
+        if isinstance(c, dict) and "name" in c and "value" in c:
+            domain = (c.get("domain") or "").lstrip(".")
+            if not domain or "chatgpt.com" in domain or "openai.com" in domain:
+                out[c["name"]] = str(c["value"])
+    return out
 
 
-async def content_generator(r, token, history=True):
-    conversation_id = None
-    title = None
+async def content_generator(r):
     async for chunk in r.aiter_content():
-        try:
-            if history and (len(token) != 45 and not token.startswith("eyJhbGciOi")) and (not conversation_id or not title):
-                chat_chunk = chunk.decode('utf-8')
-                if not conversation_id or not title and chat_chunk.startswith("event: delta\n\ndata: {"):
-                    chunk_data = chat_chunk[19:]
-                    conversation_id = json.loads(chunk_data).get("v").get("conversation_id")
-                    if conversation_id:
-                        save_conversation(token, conversation_id)
-                        title = globals.conversation_map[conversation_id].get("title")
-                if chat_chunk.startswith("data: {"):
-                    if "\n\nevent: delta" in chat_chunk:
-                        index = chat_chunk.find("\n\nevent: delta")
-                        chunk_data = chat_chunk[6:index]
-                    elif "\n\ndata: {" in chat_chunk:
-                        index = chat_chunk.find("\n\ndata: {")
-                        chunk_data = chat_chunk[6:index]
-                    else:
-                        chunk_data = chat_chunk[6:]
-                    chunk_data = chunk_data.strip()
-                    if conversation_id is None:
-                        conversation_id = json.loads(chunk_data).get("conversation_id")
-                        if conversation_id:
-                            save_conversation(token, conversation_id)
-                            title = globals.conversation_map[conversation_id].get("title")
-                    if title is None:
-                        title = json.loads(chunk_data).get("title")
-                        if title:
-                            save_conversation(token, conversation_id, title)
-        except Exception as e:
-            # logger.error(e)
-            # logger.error(chunk.decode('utf-8'))
-            pass
         yield chunk
 
 
@@ -202,22 +156,29 @@ async def chatgpt_reverse_proxy(request: Request, path: str):
             base_url = "https://web-sandbox.oaiusercontent.com"
             path = path.replace("sandbox/", "")
 
-        token = headers.get("authorization", "").replace("Bearer ", "").strip()
-        if token:
-            req_token = await get_real_req_token(token)
-            access_token = await verify_token(req_token)
-            headers.update({"authorization": f"Bearer {access_token}"})
+        chosen = await _select_instance()
+        if chosen is None:
+            raise HTTPException(
+                status_code=503,
+                detail="No instance in pool. Add one via POST /instances first.",
+            )
+        instance_id = chosen["instance_id"]
+        pool = get_pool()
+        cookies_raw = await pool.get_cookies(instance_id)
+        instance_cookies = _flatten_cookies(cookies_raw)
+        request_cookies = {**instance_cookies, **request_cookies}
 
-        cookie_token = request.cookies.get("token", "")
-        req_token = await get_real_req_token(cookie_token)
-        fp = get_fp(req_token).copy()
+        fp_raw = chosen.get("fingerprint") or "{}"
+        fp = json.loads(fp_raw) if isinstance(fp_raw, str) else (fp_raw or {})
+        proxy_url = chosen.get("proxy_url", "") or None
+        user_agent = fp.get("ua") or fp.get("user-agent") or ""
+        impersonate = "chrome120"
+        session_id = instance_id
 
-        session_id = hashlib.md5(req_token.encode()).hexdigest()
-
-        proxy_url = fp.pop("proxy_url", None)
-        impersonate = fp.pop("impersonate", "safari15_3")
-        user_agent = fp.get("user-agent")
-        headers.update(fp)
+        # Backend uses cookie-based auth; never forward client's bearer token upstream.
+        headers.pop("authorization", None)
+        if user_agent:
+            headers["user-agent"] = user_agent
 
         headers.update({
             "accept-language": "en-US,en;q=0.9",
@@ -237,26 +198,8 @@ async def chatgpt_reverse_proxy(request: Request, path: str):
 
         data = await request.body()
 
-        history = True
-        if path.endswith("backend-api/conversation") or path.endswith("backend-alt/conversation"):
-            try:
-                req_json = json.loads(data)
-                history = not req_json.get("history_and_training_disabled", False)
-            except Exception:
-                pass
-            if force_no_history:
-                history = False
-                req_json = json.loads(data)
-                req_json["history_and_training_disabled"] = True
-                data = json.dumps(req_json).encode("utf-8")
-
-
-        if "backend-api/sentinel/chat-requirements" in path and sentinel_proxy_url_list:
-            sentinel_proxy_url = random.choice(sentinel_proxy_url_list).replace("{}", session_id) if sentinel_proxy_url_list else None
-            client = Client(proxy=sentinel_proxy_url)
-        else:
-            proxy_url = proxy_url.replace("{}", session_id) if proxy_url else None
-            client = Client(proxy=proxy_url, impersonate=impersonate)
+        proxy_url = proxy_url.replace("{}", session_id) if proxy_url else None
+        client = Client(proxy=proxy_url, impersonate=impersonate)
         try:
             background = BackgroundTask(client.close)
             r = await client.request(request.method, f"{base_url}/{path}", params=params, headers=headers,
@@ -269,12 +212,12 @@ async def chatgpt_reverse_proxy(request: Request, path: str):
                                 .replace("cdn.oaistatic.com", origin_host)
                                 .replace("https", petrol)}, background=background)
             elif 'stream' in r.headers.get("content-type", ""):
-                logger.info(f"Request token: {req_token}")
+                logger.info(f"Request instance: {instance_id}")
                 logger.info(f"Request proxy: {proxy_url}")
                 logger.info(f"Request UA: {user_agent}")
                 logger.info(f"Request impersonate: {impersonate}")
                 conv_key = r.cookies.get("conv_key", "")
-                response = StreamingResponse(content_generator(r, token, history), media_type=r.headers.get("content-type", ""),
+                response = StreamingResponse(content_generator(r), media_type=r.headers.get("content-type", ""),
                                   background=background)
                 response.set_cookie("conv_key", value=conv_key)
                 return response
