@@ -18,7 +18,7 @@ spec:
     spec:
       containers:
         - name: chat2api
-          image: chat2api:current
+          image: docker.io/library/chat2api:current
           imagePullPolicy: Never
           ports:
             - containerPort: 5005

@@ -27,7 +27,7 @@ spec:
     spec:
       containers:
         - name: worker
-          image: chat2api-worker:current
+          image: docker.io/library/chat2api-worker:current
           imagePullPolicy: Never
           env:
             - name: REDIS_URL
