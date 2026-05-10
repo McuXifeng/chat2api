@@ -88,6 +88,15 @@ headers_accept_list = [
 ]
 
 
+async def get_real_req_token(token):
+    """Compat shim — share.py / backend.py still import this from a previous lifetime.
+
+    Those routes (share.py, backend.py legacy gateway) haven't been ported to
+    InstancePool yet; for now just hand the input back so imports succeed.
+    """
+    return token or ""
+
+
 async def _select_instance():
     """Pick an instance from the pool without acquiring a lease.
 
